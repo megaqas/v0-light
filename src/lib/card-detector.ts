@@ -64,25 +64,7 @@ type PixelClass = 0 | 1 | 2; // 0=background, 1=white, 2=red
 function classifyPixel(r: number, g: number, b: number): PixelClass {
   const hsv = rgbToHsv(r, g, b);
 
-  // Red detection: red hue wraps around 0/360
-  // Must reject skin tones (hue 10-30, sat 0.3-0.6, moderate red dominance)
-  // while catching red cards (hue 0-20/340-360, sat 0.35+, strong red dominance)
-  const isRedHue = hsv.h <= 22 || hsv.h >= 335;
-
-  if (isRedHue && hsv.s >= 0.38 && hsv.v >= 0.28) {
-    // Red dominance: cards have r >> g, skin has r > g but closer
-    if (r > g * 1.4 && r > b * 1.2 && r >= 90) {
-      return 2; // red
-    }
-  }
-  // Catch darker reds (distant/shadowed cards) with very strong dominance
-  if (isRedHue && hsv.s >= 0.30 && hsv.v >= 0.20) {
-    if (r > g * 1.7 && r > b * 1.4 && r >= 70) {
-      return 2; // red
-    }
-  }
-
-  // Reject light sources: extremely bright and desaturated pixels are lights, not cards
+  // Reject light sources first: extremely bright and desaturated pixels
   if (hsv.v > 0.95 && hsv.s < 0.08) {
     return 0; // light source, not a card
   }
@@ -90,8 +72,10 @@ function classifyPixel(r: number, g: number, b: number): PixelClass {
     return 0; // light source
   }
 
-  // White detection: cards in a theater can be dimmer than pure white
-  // Lowered thresholds to catch cards in shadow or at angles
+  // White detection BEFORE red — warm theater lighting gives white cards a pinkish/yellowish
+  // tint that can look reddish. Check white first so these aren't misclassified.
+
+  // Pure/cool whites
   if (hsv.s <= 0.28 && hsv.v >= 0.45 && hsv.v <= 0.95) {
     const avg = (r + g + b) / 3;
     if (avg >= 105 && avg <= 240 && Math.max(r, g, b) - Math.min(r, g, b) < 75) {
@@ -100,10 +84,28 @@ function classifyPixel(r: number, g: number, b: number): PixelClass {
   }
 
   // Warm whites (theater lighting makes white cards yellowish/pinkish)
-  if (hsv.s <= 0.35 && hsv.v >= 0.45 && hsv.v <= 0.95 && hsv.h >= 10 && hsv.h <= 65) {
+  if (hsv.s <= 0.40 && hsv.v >= 0.45 && hsv.v <= 0.95 && hsv.h >= 10 && hsv.h <= 65) {
     const avg = (r + g + b) / 3;
-    if (avg >= 110 && avg <= 240 && r >= 110 && g >= 100 && Math.max(r, g, b) - Math.min(r, g, b) < 70) {
+    if (avg >= 110 && avg <= 240 && r >= 110 && g >= 100 && Math.max(r, g, b) - Math.min(r, g, b) < 80) {
       return 1; // white (warm-tinted)
+    }
+  }
+
+  // Red detection: red hue wraps around 0/360
+  // Must be very strict — real red cards are deeply saturated and strongly red-dominant.
+  // Skin tones and warm-lit white cards must NOT pass this check.
+  const isRedHue = hsv.h <= 18 || hsv.h >= 340;
+
+  // Primary red: high saturation, strong dominance
+  if (isRedHue && hsv.s >= 0.55 && hsv.v >= 0.25) {
+    if (r > g * 1.6 && r > b * 1.3 && r >= 90) {
+      return 2; // red
+    }
+  }
+  // Fallback for darker/distant red cards: require extremely strong red dominance
+  if (isRedHue && hsv.s >= 0.45 && hsv.v >= 0.20) {
+    if (r > g * 2.0 && r > b * 1.6 && r >= 70) {
+      return 2; // red
     }
   }
 
