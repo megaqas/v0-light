@@ -65,16 +65,18 @@ function classifyPixel(r: number, g: number, b: number): PixelClass {
   const hsv = rgbToHsv(r, g, b);
 
   // Red detection: red hue wraps around 0/360
-  // Red cards: hue near 0 or near 360, moderate+ saturation, moderate+ brightness
-  const isRedHue =
-    (hsv.h <= 25 || hsv.h >= 335) ||
-    // Also catch pinkish-reds and orangish-reds under theater lighting
-    (hsv.h >= 335 && hsv.h <= 360) ||
-    (hsv.h >= 0 && hsv.h <= 25);
+  // Tightened to reject skin tones: require higher saturation and stronger red dominance
+  const isRedHue = hsv.h <= 20 || hsv.h >= 340;
 
-  if (isRedHue && hsv.s >= 0.25 && hsv.v >= 0.25) {
-    // Ensure it's actually reddish - check raw RGB dominance
-    if (r > g * 1.2 && r > b * 1.1 && r >= 80) {
+  if (isRedHue && hsv.s >= 0.45 && hsv.v >= 0.30) {
+    // Strong red dominance to reject skin (skin has r > g but not by much)
+    if (r > g * 1.5 && r > b * 1.3 && r >= 100) {
+      return 2; // red
+    }
+  }
+  // Catch darker/less saturated reds but with very strong red channel dominance
+  if (isRedHue && hsv.s >= 0.35 && hsv.v >= 0.25) {
+    if (r > g * 1.8 && r > b * 1.5 && r >= 80) {
       return 2; // red
     }
   }
@@ -83,26 +85,23 @@ function classifyPixel(r: number, g: number, b: number): PixelClass {
   if (hsv.v > 0.95 && hsv.s < 0.08) {
     return 0; // light source, not a card
   }
-  // Also reject if all channels are very close to max (glowing light)
   if (r > 240 && g > 240 && b > 240) {
     return 0; // light source
   }
 
-  // White detection: low saturation, high brightness
-  // White cards under various lighting appear as bright, desaturated pixels
-  if (hsv.s <= 0.20 && hsv.v >= 0.70 && hsv.v <= 0.95) {
-    // Additional check: all channels should be relatively high and similar
+  // White detection: cards in a theater can be dimmer than pure white
+  // Lowered thresholds to catch cards that are partially lit or at angles
+  if (hsv.s <= 0.25 && hsv.v >= 0.50 && hsv.v <= 0.95) {
     const avg = (r + g + b) / 3;
-    if (avg >= 170 && avg <= 235 && Math.max(r, g, b) - Math.min(r, g, b) < 60) {
+    if (avg >= 120 && avg <= 240 && Math.max(r, g, b) - Math.min(r, g, b) < 70) {
       return 1; // white
     }
   }
 
-  // Slightly warm whites (theater lighting makes white cards yellowish)
-  // Relaxed from original but still rejects deep golden decorations (hue > 55, sat > 0.25)
-  if (hsv.s <= 0.25 && hsv.v >= 0.75 && hsv.v <= 0.95 && hsv.h >= 20 && hsv.h <= 55) {
+  // Warm whites (theater lighting makes white cards yellowish/pinkish)
+  if (hsv.s <= 0.30 && hsv.v >= 0.55 && hsv.v <= 0.95 && hsv.h >= 15 && hsv.h <= 60) {
     const avg = (r + g + b) / 3;
-    if (avg >= 175 && avg <= 235 && r >= 175 && g >= 165 && Math.max(r, g, b) - Math.min(r, g, b) < 50) {
+    if (avg >= 130 && avg <= 240 && r >= 130 && g >= 120 && Math.max(r, g, b) - Math.min(r, g, b) < 60) {
       return 1; // white (warm-tinted)
     }
   }
@@ -160,7 +159,7 @@ export interface DetectionParams {
 }
 
 const DEFAULT_PARAMS: DetectionParams = {
-  minBlobSize: 20,
+  minBlobSize: 10,
   maxBlobSize: 8000,
   processingWidth: 1200,
   audienceTop: 0.35,
@@ -398,7 +397,7 @@ export function detectCards(
       // Cards should be noticeably brighter than their surroundings
       // A ratio near 1.0 means the blob blends in (likely a decoration/wall feature)
       const contrastRatio = blobAvg / (surroundAvg + 1);
-      if (contrastRatio < 1.15) continue; // blob isn't brighter than surroundings — not a card
+      if (contrastRatio < 1.08) continue; // blob isn't brighter than surroundings — not a card
     }
 
     candidates.push({ stats, color, bw, bh, centerY });
@@ -410,7 +409,7 @@ export function detectCards(
     const sizes = candidates.map(c => c.stats.size).sort((a, b) => a - b);
     const median = sizes[Math.floor(sizes.length / 2)];
     filteredCandidates = candidates.filter(
-      c => c.stats.size >= median / 3 && c.stats.size <= median * 3
+      c => c.stats.size >= median / 5 && c.stats.size <= median * 5
     );
   }
 
