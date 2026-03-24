@@ -16,6 +16,8 @@ export interface DetectionResult {
   totalCount: number;
   annotatedImageDataUrl: string;
   blobs: BlobInfo[];
+  /** The effective audience top boundary used (fraction of height, 0-1) */
+  effectiveAudienceTop: number;
 }
 
 export interface BlobInfo {
@@ -97,9 +99,10 @@ function classifyPixel(r: number, g: number, b: number): PixelClass {
   }
 
   // Slightly warm whites (theater lighting makes white cards yellowish)
-  if (hsv.s <= 0.30 && hsv.v >= 0.75 && hsv.v <= 0.95 && hsv.h >= 20 && hsv.h <= 60) {
+  // Tightened to reject golden/amber theater decorations (hue 45-60, sat 0.18-0.30)
+  if (hsv.s <= 0.18 && hsv.v >= 0.75 && hsv.v <= 0.95 && hsv.h >= 20 && hsv.h <= 45) {
     const avg = (r + g + b) / 3;
-    if (avg >= 180 && avg <= 235 && r >= 180 && g >= 170) {
+    if (avg >= 180 && avg <= 235 && r >= 180 && g >= 170 && Math.max(r, g, b) - Math.min(r, g, b) < 40) {
       return 1; // white (warm-tinted)
     }
   }
@@ -152,13 +155,70 @@ export interface DetectionParams {
   maxBlobSize: number;
   /** Processing width - image is scaled to this width */
   processingWidth: number;
+  /** Fraction of image height where audience starts (0-1). 0.55 means audience is bottom 45%. */
+  audienceTop: number;
 }
 
 const DEFAULT_PARAMS: DetectionParams = {
   minBlobSize: 20,
   maxBlobSize: 8000,
   processingWidth: 1200,
+  audienceTop: 0.55,
 };
+
+/**
+ * Auto-detect the audience region by finding the dense horizontal band of card pixels.
+ * Returns the row (as a fraction of height) where the audience starts.
+ */
+function detectAudienceRegion(
+  classified: Uint8Array,
+  width: number,
+  height: number,
+  userAudienceTop: number
+): number {
+  // Build row density histogram
+  const rowDensity = new Float64Array(height);
+  for (let y = 0; y < height; y++) {
+    let count = 0;
+    for (let x = 0; x < width; x++) {
+      if (classified[y * width + x] !== 0) count++;
+    }
+    rowDensity[y] = count / width;
+  }
+
+  // Smooth with moving average (window = 5% of height)
+  const windowSize = Math.max(3, Math.round(height * 0.05));
+  const smoothed = new Float64Array(height);
+  let runningSum = 0;
+  for (let y = 0; y < height; y++) {
+    runningSum += rowDensity[y];
+    if (y >= windowSize) runningSum -= rowDensity[y - windowSize];
+    const count = Math.min(y + 1, windowSize);
+    smoothed[y] = runningSum / count;
+  }
+
+  // Find peak density
+  let maxDensity = 0;
+  for (let y = 0; y < height; y++) {
+    if (smoothed[y] > maxDensity) maxDensity = smoothed[y];
+  }
+
+  if (maxDensity < 0.01) return userAudienceTop; // no card pixels found
+
+  // Find the top of the dense band (where density first exceeds 50% of peak)
+  const threshold = maxDensity * 0.5;
+  let bandTop = height;
+  for (let y = 0; y < height; y++) {
+    if (smoothed[y] >= threshold) {
+      bandTop = y;
+      break;
+    }
+  }
+
+  const autoTop = bandTop / height;
+  // Use the more conservative (higher) of auto-detected and user-set value
+  return Math.max(autoTop, userAudienceTop);
+}
 
 export function detectCards(
   imageData: ImageData,
@@ -175,6 +235,9 @@ export function detectCards(
     const idx = i * 4;
     classified[i] = classifyPixel(data[idx], data[idx + 1], data[idx + 2]);
   }
+
+  // Step 1b: Auto-detect audience region
+  const effectiveAudienceTop = detectAudienceRegion(classified, width, height, p.audienceTop);
 
   // Step 2: Morphological closing (dilate then erode) to fill small gaps in cards
   const dilated = morphDilate(classified, width, height, 1);
@@ -267,43 +330,88 @@ export function detectCards(
   }
 
   // Step 5: Filter and classify blobs
+  const scaleX = originalWidth / width;
+  const scaleY = originalHeight / height;
+  const audienceCutoffY = Math.round(effectiveAudienceTop * height);
+
+  // First pass: collect candidate blobs that pass basic filters
+  const candidates: Array<{
+    stats: { size: number; redPixels: number; whitePixels: number; sumX: number; sumY: number; minX: number; minY: number; maxX: number; maxY: number };
+    color: "red" | "white";
+    bw: number;
+    bh: number;
+    centerY: number;
+  }> = [];
+
+  for (const [, stats] of blobStats) {
+    if (stats.size < p.minBlobSize || stats.size > p.maxBlobSize) continue;
+
+    // Position check - only keep blobs in the audience region
+    const centerY = stats.sumY / stats.size;
+    if (centerY < audienceCutoffY) continue;
+
+    // Aspect ratio check
+    const bw = stats.maxX - stats.minX + 1;
+    const bh = stats.maxY - stats.minY + 1;
+    const aspect = Math.max(bw, bh) / (Math.min(bw, bh) || 1);
+    if (aspect > 4.5) continue;
+
+    // Density check
+    const bboxArea = bw * bh;
+    const density = stats.size / bboxArea;
+    if (density < 0.20) continue;
+
+    // Surround brightness filter: cards are bright against dark surroundings (people/clothing)
+    // Lights are bright against bright surroundings (ceiling/walls)
+    const margin = Math.max(bw, bh);
+    const ringMinX = Math.max(0, stats.minX - margin);
+    const ringMinY = Math.max(0, stats.minY - margin);
+    const ringMaxX = Math.min(width - 1, stats.maxX + margin);
+    const ringMaxY = Math.min(height - 1, stats.maxY + margin);
+
+    let surroundSum = 0;
+    let surroundCount = 0;
+    for (let ry = ringMinY; ry <= ringMaxY; ry += 2) { // sample every 2nd pixel for speed
+      for (let rx = ringMinX; rx <= ringMaxX; rx += 2) {
+        // Skip pixels inside the blob's bounding box
+        if (rx >= stats.minX && rx <= stats.maxX && ry >= stats.minY && ry <= stats.maxY) continue;
+        const pi = (ry * width + rx) * 4;
+        surroundSum += (data[pi] + data[pi + 1] + data[pi + 2]) / 3;
+        surroundCount++;
+      }
+    }
+
+    const color: "red" | "white" = stats.redPixels > stats.whitePixels ? "red" : "white";
+
+    if (surroundCount > 0) {
+      const surroundAvg = surroundSum / surroundCount;
+      // If surroundings are very bright, this is likely a light/decoration, not a card
+      // White blobs get a stricter threshold since they're the main source of false positives
+      const brightnessThreshold = color === "white" ? 140 : 160;
+      if (surroundAvg > brightnessThreshold) continue;
+    }
+
+    candidates.push({ stats, color, bw, bh, centerY });
+  }
+
+  // Size consistency filter: reject outlier-sized blobs when we have enough data
+  let filteredCandidates = candidates;
+  if (candidates.length >= 5) {
+    const sizes = candidates.map(c => c.stats.size).sort((a, b) => a - b);
+    const median = sizes[Math.floor(sizes.length / 2)];
+    filteredCandidates = candidates.filter(
+      c => c.stats.size >= median / 3 && c.stats.size <= median * 3
+    );
+  }
+
+  // Build final results
   const blobs: BlobInfo[] = [];
   let redCount = 0;
   let whiteCount = 0;
   let blobId = 0;
 
-  const scaleX = originalWidth / width;
-  const scaleY = originalHeight / height;
-
-  for (const [, stats] of blobStats) {
-    if (stats.size < p.minBlobSize || stats.size > p.maxBlobSize) continue;
-
-    // Position check - ignore blobs in the top 15% of the image (ceiling/lights area)
-    const centerY = stats.sumY / stats.size;
-    if (centerY < height * 0.15) continue;
-
-    // Aspect ratio check - cards are roughly rectangular, not super elongated
-    const bw = stats.maxX - stats.minX + 1;
-    const bh = stats.maxY - stats.minY + 1;
-    const aspect = Math.max(bw, bh) / (Math.min(bw, bh) || 1);
-    if (aspect > 4.5) continue; // too elongated, probably not a card
-
-    // Density check - cards should fill their bounding box reasonably well
-    const bboxArea = bw * bh;
-    const density = stats.size / bboxArea;
-    if (density < 0.20) continue; // too sparse, likely not a solid card
-
-    // Compactness check - reject very circular blobs (lights tend to be round)
-    // Cards are rectangular so perimeter-to-area ratio differs from circles
-    // A circle has the highest compactness (area/perimeter^2 ≈ 0.0796)
-    // We approximate perimeter as bounding box perimeter
-    const perimeter = 2 * (bw + bh);
-    const compactness = stats.size / (perimeter * perimeter);
-    // Very compact + very small blobs near the top half are likely lights
-    if (compactness > 0.07 && centerY < height * 0.35 && stats.size < p.minBlobSize * 10) continue;
-
-    const color: "red" | "white" =
-      stats.redPixels > stats.whitePixels ? "red" : "white";
+  for (const candidate of filteredCandidates) {
+    const { stats, color, bw, bh } = candidate;
 
     if (color === "red") redCount++;
     else whiteCount++;
@@ -339,6 +447,7 @@ export function detectCards(
     totalCount: redCount + whiteCount,
     annotatedImageDataUrl: annotatedDataUrl,
     blobs,
+    effectiveAudienceTop,
   };
 }
 
@@ -509,6 +618,22 @@ export function processImage(
     actx.lineWidth = 1;
     actx.stroke();
   }
+
+  // Draw audience region guide line (dashed)
+  const guideY = Math.round(result.effectiveAudienceTop * procHeight);
+  actx.setLineDash([8, 6]);
+  actx.strokeStyle = "rgba(0, 255, 100, 0.7)";
+  actx.lineWidth = 2;
+  actx.beginPath();
+  actx.moveTo(0, guideY);
+  actx.lineTo(procWidth, guideY);
+  actx.stroke();
+  actx.setLineDash([]);
+  // Label
+  actx.fillStyle = "rgba(0, 255, 100, 0.85)";
+  actx.font = "bold 11px sans-serif";
+  actx.textAlign = "left";
+  actx.fillText("▼ Audience region", 6, guideY - 4);
 
   result.annotatedImageDataUrl = annotCanvas.toDataURL("image/jpeg", 0.9);
 
