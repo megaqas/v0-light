@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { processImage, DetectionResult, DetectionParams } from "@/lib/card-detector";
 
 export default function Home() {
@@ -17,10 +17,23 @@ export default function Home() {
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
+  const objectUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+      }
+    };
+  }, []);
 
   const handleFile = useCallback(
     (file: File) => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+      }
       const url = URL.createObjectURL(file);
+      objectUrlRef.current = url;
       setImageUrl(url);
       setResult(null);
       setProcessing(true);
@@ -34,6 +47,7 @@ export default function Home() {
         setResult(detection);
         setProcessing(false);
       };
+      img.onerror = () => setProcessing(false);
       img.src = url;
     },
     [params]
@@ -50,10 +64,13 @@ export default function Home() {
     [handleFile]
   );
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleFile(file);
-  };
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) handleFile(file);
+    },
+    [handleFile]
+  );
 
   const reprocess = () => {
     if (!imageUrl) return;
@@ -65,6 +82,7 @@ export default function Home() {
       setResult(detection);
       setProcessing(false);
     };
+    img.onerror = () => setProcessing(false);
     img.src = imageUrl;
   };
 

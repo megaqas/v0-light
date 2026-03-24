@@ -162,9 +162,9 @@ export interface DetectionParams {
 }
 
 const DEFAULT_PARAMS: DetectionParams = {
-  minBlobSize: 12,
-  maxBlobSize: 10000,
-  processingWidth: 1400,
+  minBlobSize: 20,
+  maxBlobSize: 8000,
+  processingWidth: 1200,
   audienceTop: 0.35,
 };
 
@@ -443,21 +443,11 @@ export function detectCards(
     });
   }
 
-  // Step 6: Create annotated image
-  const annotatedDataUrl = createAnnotatedImage(
-    data,
-    width,
-    height,
-    blobs,
-    scaleX,
-    scaleY
-  );
-
   return {
     redCount,
     whiteCount,
     totalCount: redCount + whiteCount,
-    annotatedImageDataUrl: annotatedDataUrl,
+    annotatedImageDataUrl: "", // filled in by processImage after canvas annotation
     blobs,
     effectiveAudienceTop,
   };
@@ -520,48 +510,6 @@ function morphErode(
     }
   }
   return out;
-}
-
-function createAnnotatedImage(
-  originalData: Uint8ClampedArray,
-  width: number,
-  height: number,
-  blobs: BlobInfo[],
-  scaleX: number,
-  scaleY: number
-): string {
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext("2d")!;
-
-  // Draw original image
-  const imgData = new ImageData(new Uint8ClampedArray(originalData), width, height);
-  ctx.putImageData(imgData, 0, 0);
-
-  // Draw blob markers
-  for (const blob of blobs) {
-    const bx = blob.bbox.x / scaleX;
-    const by = blob.bbox.y / scaleY;
-    const bw = blob.bbox.w / scaleX;
-    const bh = blob.bbox.h / scaleY;
-
-    ctx.strokeStyle = blob.color === "red" ? "#ff0000" : "#0066ff";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(bx, by, bw, bh);
-
-    // Label
-    const cx = blob.cx / scaleX;
-    const cy = blob.cy / scaleY;
-    ctx.fillStyle = blob.color === "red" ? "#ff0000" : "#0066ff";
-    ctx.font = "bold 10px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText(blob.color === "red" ? "R" : "W", cx, cy + 3);
-  }
-
-  // Convert to data URL via blob
-  // OffscreenCanvas doesn't have toDataURL, we need to use convertToBlob
-  // But since this runs synchronously in our flow, we'll return a placeholder
-  // and handle the async conversion in the component
-  return ""; // Will be handled by the component
 }
 
 /**
