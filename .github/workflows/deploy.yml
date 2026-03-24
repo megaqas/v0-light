@@ -24,6 +24,8 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npx next build
+        env:
+          PAGES_BASE_PATH: /v0-light
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./out
