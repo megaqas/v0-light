@@ -77,20 +77,29 @@ function classifyPixel(r: number, g: number, b: number): PixelClass {
     }
   }
 
+  // Reject light sources: extremely bright and desaturated pixels are lights, not cards
+  if (hsv.v > 0.95 && hsv.s < 0.08) {
+    return 0; // light source, not a card
+  }
+  // Also reject if all channels are very close to max (glowing light)
+  if (r > 240 && g > 240 && b > 240) {
+    return 0; // light source
+  }
+
   // White detection: low saturation, high brightness
   // White cards under various lighting appear as bright, desaturated pixels
-  if (hsv.s <= 0.20 && hsv.v >= 0.70) {
+  if (hsv.s <= 0.20 && hsv.v >= 0.70 && hsv.v <= 0.95) {
     // Additional check: all channels should be relatively high and similar
     const avg = (r + g + b) / 3;
-    if (avg >= 170 && Math.max(r, g, b) - Math.min(r, g, b) < 60) {
+    if (avg >= 170 && avg <= 235 && Math.max(r, g, b) - Math.min(r, g, b) < 60) {
       return 1; // white
     }
   }
 
   // Slightly warm whites (theater lighting makes white cards yellowish)
-  if (hsv.s <= 0.30 && hsv.v >= 0.75 && hsv.h >= 20 && hsv.h <= 60) {
+  if (hsv.s <= 0.30 && hsv.v >= 0.75 && hsv.v <= 0.95 && hsv.h >= 20 && hsv.h <= 60) {
     const avg = (r + g + b) / 3;
-    if (avg >= 180 && r >= 180 && g >= 170) {
+    if (avg >= 180 && avg <= 235 && r >= 180 && g >= 170) {
       return 1; // white (warm-tinted)
     }
   }
@@ -269,16 +278,29 @@ export function detectCards(
   for (const [, stats] of blobStats) {
     if (stats.size < p.minBlobSize || stats.size > p.maxBlobSize) continue;
 
+    // Position check - ignore blobs in the top 15% of the image (ceiling/lights area)
+    const centerY = stats.sumY / stats.size;
+    if (centerY < height * 0.15) continue;
+
     // Aspect ratio check - cards are roughly rectangular, not super elongated
     const bw = stats.maxX - stats.minX + 1;
     const bh = stats.maxY - stats.minY + 1;
     const aspect = Math.max(bw, bh) / (Math.min(bw, bh) || 1);
-    if (aspect > 6) continue; // too elongated, probably not a card
+    if (aspect > 4.5) continue; // too elongated, probably not a card
 
     // Density check - cards should fill their bounding box reasonably well
     const bboxArea = bw * bh;
     const density = stats.size / bboxArea;
-    if (density < 0.15) continue; // too sparse
+    if (density < 0.20) continue; // too sparse, likely not a solid card
+
+    // Compactness check - reject very circular blobs (lights tend to be round)
+    // Cards are rectangular so perimeter-to-area ratio differs from circles
+    // A circle has the highest compactness (area/perimeter^2 ≈ 0.0796)
+    // We approximate perimeter as bounding box perimeter
+    const perimeter = 2 * (bw + bh);
+    const compactness = stats.size / (perimeter * perimeter);
+    // Very compact + very small blobs near the top half are likely lights
+    if (compactness > 0.07 && centerY < height * 0.35 && stats.size < p.minBlobSize * 10) continue;
 
     const color: "red" | "white" =
       stats.redPixels > stats.whitePixels ? "red" : "white";
