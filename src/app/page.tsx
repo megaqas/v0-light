@@ -13,7 +13,7 @@ export default function Home() {
     minBlobSize: 20,
     maxBlobSize: 8000,
     processingWidth: 1200,
-    audienceTop: 0.55,
+    audienceTop: 0.35,
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);

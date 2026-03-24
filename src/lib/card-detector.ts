@@ -99,10 +99,10 @@ function classifyPixel(r: number, g: number, b: number): PixelClass {
   }
 
   // Slightly warm whites (theater lighting makes white cards yellowish)
-  // Tightened to reject golden/amber theater decorations (hue 45-60, sat 0.18-0.30)
-  if (hsv.s <= 0.18 && hsv.v >= 0.75 && hsv.v <= 0.95 && hsv.h >= 20 && hsv.h <= 45) {
+  // Relaxed from original but still rejects deep golden decorations (hue > 55, sat > 0.25)
+  if (hsv.s <= 0.25 && hsv.v >= 0.75 && hsv.v <= 0.95 && hsv.h >= 20 && hsv.h <= 55) {
     const avg = (r + g + b) / 3;
-    if (avg >= 180 && avg <= 235 && r >= 180 && g >= 170 && Math.max(r, g, b) - Math.min(r, g, b) < 40) {
+    if (avg >= 175 && avg <= 235 && r >= 175 && g >= 165 && Math.max(r, g, b) - Math.min(r, g, b) < 50) {
       return 1; // white (warm-tinted)
     }
   }
@@ -163,7 +163,7 @@ const DEFAULT_PARAMS: DetectionParams = {
   minBlobSize: 20,
   maxBlobSize: 8000,
   processingWidth: 1200,
-  audienceTop: 0.55,
+  audienceTop: 0.35,
 };
 
 /**
@@ -216,8 +216,9 @@ function detectAudienceRegion(
   }
 
   const autoTop = bandTop / height;
-  // Use the more conservative (higher) of auto-detected and user-set value
-  return Math.max(autoTop, userAudienceTop);
+  // Auto-detect can only LOWER the cutoff (include more area), never raise it
+  // This ensures the balcony and other audience areas aren't accidentally excluded
+  return Math.min(autoTop, userAudienceTop);
 }
 
 export function detectCards(
@@ -361,8 +362,9 @@ export function detectCards(
     const density = stats.size / bboxArea;
     if (density < 0.20) continue;
 
-    // Surround brightness filter: cards are bright against dark surroundings (people/clothing)
-    // Lights are bright against bright surroundings (ceiling/walls)
+    // Surround contrast filter: cards are bright against darker surroundings (people/clothing)
+    // Lights/decorations are bright but surrounded by similarly bright areas
+    // Use contrast ratio instead of absolute brightness (works in well-lit theaters)
     const margin = Math.max(bw, bh);
     const ringMinX = Math.max(0, stats.minX - margin);
     const ringMinY = Math.max(0, stats.minY - margin);
@@ -371,24 +373,32 @@ export function detectCards(
 
     let surroundSum = 0;
     let surroundCount = 0;
-    for (let ry = ringMinY; ry <= ringMaxY; ry += 2) { // sample every 2nd pixel for speed
+    let blobSum = 0;
+    let blobCount = 0;
+
+    for (let ry = ringMinY; ry <= ringMaxY; ry += 2) {
       for (let rx = ringMinX; rx <= ringMaxX; rx += 2) {
-        // Skip pixels inside the blob's bounding box
-        if (rx >= stats.minX && rx <= stats.maxX && ry >= stats.minY && ry <= stats.maxY) continue;
         const pi = (ry * width + rx) * 4;
-        surroundSum += (data[pi] + data[pi + 1] + data[pi + 2]) / 3;
-        surroundCount++;
+        const brightness = (data[pi] + data[pi + 1] + data[pi + 2]) / 3;
+        if (rx >= stats.minX && rx <= stats.maxX && ry >= stats.minY && ry <= stats.maxY) {
+          blobSum += brightness;
+          blobCount++;
+        } else {
+          surroundSum += brightness;
+          surroundCount++;
+        }
       }
     }
 
     const color: "red" | "white" = stats.redPixels > stats.whitePixels ? "red" : "white";
 
-    if (surroundCount > 0) {
+    if (surroundCount > 0 && blobCount > 0) {
       const surroundAvg = surroundSum / surroundCount;
-      // If surroundings are very bright, this is likely a light/decoration, not a card
-      // White blobs get a stricter threshold since they're the main source of false positives
-      const brightnessThreshold = color === "white" ? 140 : 160;
-      if (surroundAvg > brightnessThreshold) continue;
+      const blobAvg = blobSum / blobCount;
+      // Cards should be noticeably brighter than their surroundings
+      // A ratio near 1.0 means the blob blends in (likely a decoration/wall feature)
+      const contrastRatio = blobAvg / (surroundAvg + 1);
+      if (contrastRatio < 1.15) continue; // blob isn't brighter than surroundings — not a card
     }
 
     candidates.push({ stats, color, bw, bh, centerY });
