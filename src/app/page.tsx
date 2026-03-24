@@ -13,6 +13,7 @@ export default function Home() {
     minBlobSize: 20,
     maxBlobSize: 8000,
     processingWidth: 1200,
+    audienceTop: 0.55,
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -247,6 +248,22 @@ export default function Home() {
                       value={params.maxBlobSize}
                       onChange={(e) =>
                         setParams({ ...params, maxBlobSize: +e.target.value })
+                      }
+                      className="w-full accent-blue-600"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">
+                      Audience starts at: {Math.round(params.audienceTop * 100)}% from top
+                    </label>
+                    <input
+                      type="range"
+                      min="0.30"
+                      max="0.80"
+                      step="0.05"
+                      value={params.audienceTop}
+                      onChange={(e) =>
+                        setParams({ ...params, audienceTop: +e.target.value })
                       }
                       className="w-full accent-blue-600"
                     />
