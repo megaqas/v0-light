@@ -3,10 +3,33 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { processImage, DetectionResult, DetectionParams } from "@/lib/card-detector";
 
+interface CountResult {
+  redCount: number;
+  whiteCount: number;
+  totalCount: number;
+  annotatedImageDataUrl?: string;
+  source: "ai" | "local";
+}
+
+function toBase64(file: File): Promise<{ base64: string; mimeType: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const [header, base64] = dataUrl.split(",");
+      const mimeType = header.match(/:(.*?);/)?.[1] ?? "image/jpeg";
+      resolve({ base64, mimeType });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Home() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [result, setResult] = useState<DetectionResult | null>(null);
+  const [result, setResult] = useState<CountResult | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [processingLabel, setProcessingLabel] = useState("Processing...");
   const [showAnnotated, setShowAnnotated] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [params, setParams] = useState<DetectionParams>({
@@ -18,6 +41,7 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const objectUrlRef = useRef<string | null>(null);
+  const fileRef = useRef<File | null>(null);
 
   useEffect(() => {
     return () => {
@@ -27,30 +51,81 @@ export default function Home() {
     };
   }, []);
 
+  const runAiCount = useCallback(async (file: File): Promise<CountResult | null> => {
+    try {
+      const { base64, mimeType } = await toBase64(file);
+      const res = await fetch("/api/count-cards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: base64, mimeType }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.error) return null;
+      return {
+        redCount: data.redCount,
+        whiteCount: data.whiteCount,
+        totalCount: data.totalCount,
+        annotatedImageDataUrl: "",
+        source: "ai",
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const runLocalCount = useCallback(
+    (url: string, currentParams: DetectionParams): Promise<CountResult> => {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const detection: DetectionResult = processImage(img, currentParams);
+          resolve({
+            redCount: detection.redCount,
+            whiteCount: detection.whiteCount,
+            totalCount: detection.totalCount,
+            annotatedImageDataUrl: detection.annotatedImageDataUrl,
+            source: "local",
+          });
+        };
+        img.onerror = reject;
+        img.src = url;
+      });
+    },
+    []
+  );
+
   const handleFile = useCallback(
-    (file: File) => {
+    async (file: File) => {
       if (objectUrlRef.current) {
         URL.revokeObjectURL(objectUrlRef.current);
       }
       const url = URL.createObjectURL(file);
       objectUrlRef.current = url;
+      fileRef.current = file;
       setImageUrl(url);
       setResult(null);
       setProcessing(true);
+      setProcessingLabel("Counting with AI...");
 
-      const img = new Image();
-      img.onload = () => {
-        const startTime = performance.now();
-        const detection = processImage(img, params);
-        const elapsed = Math.round(performance.now() - startTime);
-        console.log(`Detection took ${elapsed}ms`);
-        setResult(detection);
+      const aiResult = await runAiCount(file);
+      if (aiResult) {
+        setResult(aiResult);
         setProcessing(false);
-      };
-      img.onerror = () => setProcessing(false);
-      img.src = url;
+        return;
+      }
+
+      // AI failed — fall back to local detection
+      setProcessingLabel("Processing locally...");
+      try {
+        const localResult = await runLocalCount(url, params);
+        setResult(localResult);
+      } catch {
+        // nothing to show
+      }
+      setProcessing(false);
     },
-    [params]
+    [params, runAiCount, runLocalCount]
   );
 
   const handleDrop = useCallback(
@@ -72,19 +147,30 @@ export default function Home() {
     [handleFile]
   );
 
-  const reprocess = () => {
+  const reprocess = useCallback(async () => {
     if (!imageUrl) return;
     setProcessing(true);
     setResult(null);
-    const img = new Image();
-    img.onload = () => {
-      const detection = processImage(img, params);
-      setResult(detection);
-      setProcessing(false);
-    };
-    img.onerror = () => setProcessing(false);
-    img.src = imageUrl;
-  };
+
+    if (fileRef.current) {
+      setProcessingLabel("Counting with AI...");
+      const aiResult = await runAiCount(fileRef.current);
+      if (aiResult) {
+        setResult(aiResult);
+        setProcessing(false);
+        return;
+      }
+    }
+
+    setProcessingLabel("Processing locally...");
+    try {
+      const localResult = await runLocalCount(imageUrl, params);
+      setResult(localResult);
+    } catch {
+      // nothing to show
+    }
+    setProcessing(false);
+  }, [imageUrl, params, runAiCount, runLocalCount]);
 
   return (
     <div className="min-h-screen bg-gray-50 p-3 sm:p-4 md:p-8">
@@ -175,11 +261,24 @@ export default function Home() {
               </div>
             )}
 
+            {/* Source badge */}
+            {result && !processing && (
+              <div className="flex justify-center">
+                <span className={`text-xs px-3 py-1 rounded-full font-medium ${
+                  result.source === "ai"
+                    ? "bg-purple-100 text-purple-700"
+                    : "bg-gray-100 text-gray-500"
+                }`}>
+                  {result.source === "ai" ? "AI counted" : "Local detection"}
+                </span>
+              </div>
+            )}
+
             {/* Processing indicator */}
             {processing && (
               <div className="bg-white rounded-lg p-6 sm:p-8 shadow-sm text-center">
-                <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full mx-auto mb-3" />
-                <div className="text-gray-600 text-base">Processing...</div>
+                <div className="animate-spin w-8 h-8 border-4 border-purple-600 border-t-transparent rounded-full mx-auto mb-3" />
+                <div className="text-gray-600 text-base">{processingLabel}</div>
               </div>
             )}
 
@@ -204,13 +303,14 @@ export default function Home() {
                   setImageUrl(null);
                   setResult(null);
                   setShowSettings(false);
+                  fileRef.current = null;
                 }}
                 className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-xl text-sm sm:text-base font-medium transition-colors"
               >
                 New Photo
               </button>
 
-              {result && (
+              {result && result.annotatedImageDataUrl && (
                 <button
                   onClick={() => setShowAnnotated(!showAnnotated)}
                   className="flex-1 py-3 bg-gray-100 hover:bg-gray-200 active:bg-gray-300 rounded-xl text-sm sm:text-base font-medium transition-colors"
@@ -238,6 +338,9 @@ export default function Home() {
             {showSettings && (
               <div className="bg-white rounded-xl p-4 shadow-sm space-y-4">
                 <h3 className="font-medium text-gray-700 text-sm">Detection Settings</h3>
+                <p className="text-xs text-gray-400">
+                  These apply only when AI is unavailable and local detection is used as fallback.
+                </p>
                 <div className="space-y-3">
                   <div>
                     <label className="text-xs text-gray-500 block mb-1">
@@ -308,7 +411,7 @@ export default function Home() {
                   disabled={processing}
                   className="w-full py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:bg-blue-300 text-white rounded-xl text-sm font-medium transition-colors"
                 >
-                  Reprocess
+                  Recount
                 </button>
               </div>
             )}
