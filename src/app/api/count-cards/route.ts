@@ -1,5 +1,57 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import fs from "fs";
+import path from "path";
+
+// Training examples from Kote Marjanishvili Theater, Tbilisi — play "Terror"
+// Audience votes with small rectangular red (guilty) or white (not guilty) cards.
+const EXAMPLES = [
+  {
+    file: "ex1.jpg", // IMG_5190
+    label: '{"redCount": 5, "whiteCount": 13}',
+  },
+  {
+    file: "ex2.jpg", // IMG_5224 — only red cards raised
+    label: '{"redCount": 32, "whiteCount": 0}',
+  },
+  {
+    file: "ex3.jpg", // IMG_5226 — only white cards raised
+    label: '{"redCount": 0, "whiteCount": 158}',
+  },
+  {
+    file: "ex4.jpg", // IMG_5228 — both colors, full house
+    label: '{"redCount": 39, "whiteCount": 191}',
+  },
+];
+
+function loadExampleBase64(filename: string): string {
+  const filePath = path.join(process.cwd(), "public", "training", filename);
+  return fs.readFileSync(filePath).toString("base64");
+}
+
+const SYSTEM_INSTRUCTION = `You are counting audience voting cards at Kote Marjanishvili Theater in Tbilisi, Georgia during the play "Terror".
+
+CONTEXT:
+- The audience votes by raising small flat rectangular cards: RED = guilty, WHITE = not guilty
+- Total audience is typically 150–230 people
+- In some voting rounds ONLY red OR ONLY white cards are raised — this is normal
+- The theater has an ornate golden balcony, green upholstered seats, warm stage lighting
+
+WHAT TO COUNT:
+- Small flat rectangular paper/cardboard cards HELD UP in the air above or in front of the body
+- Only count cards that are clearly raised intentionally as part of the vote
+
+DO NOT COUNT:
+- Clothing: red shirts, jackets, scarves, coats — these are worn on the body, NOT held up
+- Skin, hair, or faces
+- Seat covers, wall decorations, lights, or the stage
+- Anything not clearly a flat card being deliberately held up
+
+KEY RULE: If a red or white area is part of what someone is WEARING, ignore it completely.
+
+Return ONLY valid JSON, no other text: {"redCount": <integer>, "whiteCount": <integer>}`;
+
+const QUESTION = "Count the red and white voting cards being held up by audience members. Return only JSON.";
 
 export async function POST(req: NextRequest) {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -21,46 +73,45 @@ export async function POST(req: NextRequest) {
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
     model: "gemini-1.5-pro",
+    systemInstruction: SYSTEM_INSTRUCTION,
     generationConfig: { temperature: 0.1 },
   });
 
-  const prompt = `You are a precise vote-card counter. Your job is to count small flat rectangular cards being actively held up in the air by audience members.
+  // Build few-shot conversation: alternating user (image+question) / model (correct answer)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const contents: any[] = [];
 
-WHAT COUNTS AS A CARD:
-- A flat rectangular piece of paper or cardboard
-- Held UP in the air by a person — arm raised, card clearly displayed above or in front of their body
-- Intentionally shown to a camera or judge (voting cards, response cards, audience participation cards)
-- Typically the size of an A4 sheet or smaller, held in one or two hands
+  for (const ex of EXAMPLES) {
+    let exBase64: string;
+    try {
+      exBase64 = loadExampleBase64(ex.file);
+    } catch {
+      continue; // skip if file missing (shouldn't happen in production)
+    }
+    contents.push({
+      role: "user",
+      parts: [
+        { inlineData: { mimeType: "image/jpeg", data: exBase64 } },
+        { text: QUESTION },
+      ],
+    });
+    contents.push({
+      role: "model",
+      parts: [{ text: ex.label }],
+    });
+  }
 
-WHAT DOES NOT COUNT — IGNORE THESE COMPLETELY:
-- Clothing: red shirts, red jackets, red scarves, white shirts, white coats — DO NOT COUNT these even if they are clearly red or white
-- A person's skin, hair, or face
-- Seat covers, banners, posters attached to walls or poles
-- Lights, screens, or reflections
-- Anything that is part of what someone is wearing (on their body)
-- Background colors or decorations
-
-KEY DISTINCTION: Clothing is worn ON the body. A card is held UP away from the body with intention. If you are unsure whether something is a held card or clothing, do NOT count it.
-
-COUNTING METHOD:
-1. First, identify every person in the image with an arm raised or extended
-2. For each raised arm, check what is in their hand — is it a flat card being displayed?
-3. Count only confirmed held-up cards
-4. Scan left to right, top to bottom, row by row to avoid missing anyone
-
-Count:
-- RED cards: red or dark-red colored flat cards/papers being held up
-- WHITE cards: white or light-colored flat cards/papers being held up
-
-Return ONLY this JSON with no explanation, no markdown, no extra text:
-{"redCount": <integer>, "whiteCount": <integer>}`;
+  // Add the actual image to count
+  contents.push({
+    role: "user",
+    parts: [
+      { inlineData: { mimeType, data: imageBase64 } },
+      { text: QUESTION },
+    ],
+  });
 
   try {
-    const result = await model.generateContent([
-      { inlineData: { mimeType, data: imageBase64 } },
-      prompt,
-    ]);
-
+    const result = await model.generateContent({ contents });
     const text = result.response.text().trim();
     const jsonMatch = text.match(/\{[^}]+\}/);
     if (!jsonMatch) {
