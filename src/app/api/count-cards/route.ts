@@ -19,21 +19,40 @@ export async function POST(req: NextRequest) {
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-pro",
+    generationConfig: { temperature: 0.1 },
+  });
 
-  const prompt = `You are counting cards held up by audience members in this photo.
+  const prompt = `You are a precise vote-card counter. Your job is to count small flat rectangular cards being actively held up in the air by audience members.
+
+WHAT COUNTS AS A CARD:
+- A flat rectangular piece of paper or cardboard
+- Held UP in the air by a person — arm raised, card clearly displayed above or in front of their body
+- Intentionally shown to a camera or judge (voting cards, response cards, audience participation cards)
+- Typically the size of an A4 sheet or smaller, held in one or two hands
+
+WHAT DOES NOT COUNT — IGNORE THESE COMPLETELY:
+- Clothing: red shirts, red jackets, red scarves, white shirts, white coats — DO NOT COUNT these even if they are clearly red or white
+- A person's skin, hair, or face
+- Seat covers, banners, posters attached to walls or poles
+- Lights, screens, or reflections
+- Anything that is part of what someone is wearing (on their body)
+- Background colors or decorations
+
+KEY DISTINCTION: Clothing is worn ON the body. A card is held UP away from the body with intention. If you are unsure whether something is a held card or clothing, do NOT count it.
+
+COUNTING METHOD:
+1. First, identify every person in the image with an arm raised or extended
+2. For each raised arm, check what is in their hand — is it a flat card being displayed?
+3. Count only confirmed held-up cards
+4. Scan left to right, top to bottom, row by row to avoid missing anyone
 
 Count:
-1. RED cards — any red-colored cards, sheets, signs, or paddles held by people
-2. WHITE cards — any white-colored cards, sheets, signs, or paddles held by people
+- RED cards: red or dark-red colored flat cards/papers being held up
+- WHITE cards: white or light-colored flat cards/papers being held up
 
-Rules:
-- Only count cards/sheets clearly being held up by people
-- Scan the image systematically: left to right, row by row
-- Do not count partial cards unless clearly identifiable as a distinct card
-- If there are no cards of a color, return 0
-
-Return ONLY valid JSON in exactly this format with no extra text:
+Return ONLY this JSON with no explanation, no markdown, no extra text:
 {"redCount": <integer>, "whiteCount": <integer>}`;
 
   try {
